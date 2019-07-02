@@ -39,6 +39,8 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
         _autoScrollingPointerPoint{ std::nullopt },
         _autoScrollTimer{},
         _lastAutoScrollUpdateTime{ std::nullopt },
+        _isMousePanning{ false },
+        _mousePanningAnchor{},
         _desiredFont{ DEFAULT_FONT_FACE.c_str(), 0, 10, { 0, DEFAULT_FONT_SIZE }, CP_UTF8 },
         _actualFont{ DEFAULT_FONT_FACE.c_str(), 0, 10, { 0, DEFAULT_FONT_SIZE }, CP_UTF8, false },
         _touchAnchor{ std::nullopt },
@@ -720,6 +722,17 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
                     PasteTextFromClipboard();
                 }
             }
+            else if (point.Properties().IsMiddleButtonPressed())
+            {
+                if (_isMousePanning)
+                {
+                    _TryStopMousePanning(point.PointerId());
+                }
+                else
+                {
+                    _TryStartMousePanning(point);
+                }
+            }
         }
         else if (ptr.PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Touch)
         {
@@ -756,11 +769,11 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
                 double newAutoScrollVelocity = 0.0;
                 if (cursorBelowBottomDist > minAutoScrollDist)
                 {
-                    newAutoScrollVelocity = _GetAutoScrollSpeed(cursorBelowBottomDist);
+                    newAutoScrollVelocity = _GetOffscreenSelectionAutoScrollSpeed(cursorBelowBottomDist);
                 }
                 else if (cursorAboveTopDist > minAutoScrollDist)
                 {
-                    newAutoScrollVelocity = -1.0 * _GetAutoScrollSpeed(cursorAboveTopDist);
+                    newAutoScrollVelocity = -1.0 * _GetOffscreenSelectionAutoScrollSpeed(cursorAboveTopDist);
                 }
 
                 if (newAutoScrollVelocity != 0)
@@ -769,8 +782,14 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
                 }
                 else
                 {
-                    _TryStopAutoScroll(ptr.PointerId());
+                    _TryStopAutoScroll(point.PointerId());
                 }
+            }
+            else if (_isMousePanning)
+            {
+                const double distFromAnchor = point.Position().Y - _mousePanningAnchor.Y;
+                const double autoScrollVelocity = _GetMousePanningAutoScrollVelocity(distFromAnchor);
+                _TryStartAutoScroll(point, autoScrollVelocity);
             }
         }
         else if (ptr.PointerDeviceType() == Windows::Devices::Input::PointerDeviceType::Touch && _touchAnchor)
@@ -826,7 +845,13 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
             _touchAnchor = std::nullopt;
         }
 
-        _TryStopAutoScroll(ptr.PointerId());
+        if (_isMousePanning)
+        {
+        }
+        else
+        {
+            _TryStopAutoScroll(ptr.PointerId());
+        }
 
         args.Handled(true);
     }
@@ -1017,14 +1042,21 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
     // - pointerPoint: info about pointer that causes auto scroll. Pointer's position
     //      is later used to update selection.
     // - scrollVelocity: target velocity of scrolling in characters / sec
-    void TermControl::_TryStartAutoScroll(Windows::UI::Input::PointerPoint const& pointerPoint, const double scrollVelocity)
+    // Returns:
+    // - true if started or continues auto scroll, false otherwise
+    bool TermControl::_TryStartAutoScroll(Windows::UI::Input::PointerPoint const& pointerPoint, const double scrollVelocity)
     {
         // Allow only one pointer at the time
-        if (!_autoScrollingPointerPoint.has_value() || _autoScrollingPointerPoint.value().PointerId() == pointerPoint.PointerId())
+        if (_autoScrollingPointerPoint.has_value() && _autoScrollingPointerPoint.value().PointerId() != pointerPoint.PointerId())
         {
-            _autoScrollingPointerPoint = pointerPoint;
-            _autoScrollVelocity = scrollVelocity;
+            return false;
+        }
 
+        _autoScrollingPointerPoint = pointerPoint;
+        _autoScrollVelocity = scrollVelocity;
+
+        if (_autoScrollVelocity != 0)
+        {
             // If this is first time the auto scroll update is about to be called,
             //      kick-start it by initializing its time delta as if it started now
             if (!_lastAutoScrollUpdateTime.has_value())
@@ -1038,26 +1070,34 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
                 _autoScrollTimer.Start();
             }
         }
+
+        return true;
     }
 
     // Method Description:
     // - Stops auto scroll if it's active and is associated with supplied pointer id.
     // Arguments:
     // - pointerId: id of pointer for which to stop auto scroll
-    void TermControl::_TryStopAutoScroll(const uint32_t pointerId)
+    // Returns:
+    // - true if stopped current auto scroll, false otherwise
+    bool TermControl::_TryStopAutoScroll(const uint32_t pointerId)
     {
-        if (_autoScrollingPointerPoint.has_value() && pointerId == _autoScrollingPointerPoint.value().PointerId())
+        if (!_autoScrollingPointerPoint.has_value() || pointerId != _autoScrollingPointerPoint.value().PointerId())
         {
-            _autoScrollingPointerPoint = std::nullopt;
-            _autoScrollVelocity = 0;
-            _lastAutoScrollUpdateTime = std::nullopt;
-
-            // Apparently this check is not necessary but greatly improves performance
-            if (_autoScrollTimer.IsEnabled())
-            {
-                _autoScrollTimer.Stop();
-            }
+            return false;
         }
+
+        _autoScrollingPointerPoint = std::nullopt;
+        _autoScrollVelocity = 0;
+        _lastAutoScrollUpdateTime = std::nullopt;
+
+        // Apparently this check is not necessary but greatly improves performance
+        if (_autoScrollTimer.IsEnabled())
+        {
+            _autoScrollTimer.Stop();
+        }
+
+        return true;
     }
 
     // Method Description:
@@ -1084,6 +1124,30 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
             }
 
             _lastAutoScrollUpdateTime = timeNow;
+        }
+    }
+
+    void TermControl::_TryStartMousePanning(Windows::UI::Input::PointerPoint const& pointerPoint)
+    {
+        if (_isMousePanning)
+        {
+            return;
+        }
+
+        _mousePanningAnchor = pointerPoint.Position();
+        _isMousePanning = _TryStartAutoScroll(pointerPoint, 0);
+    }
+
+    void TermControl::_TryStopMousePanning(const uint32_t pointerId)
+    {
+        if (!_isMousePanning)
+        {
+            return;
+        }
+
+        if (_TryStopAutoScroll(pointerId))
+        {
+            _isMousePanning = false;
         }
     }
 
@@ -1629,11 +1693,23 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
     // - cursorDistanceFromBorder: distance from viewport border to cursor, in pixels. Must be non-negative.
     // Return Value:
     // - positive speed in characters / sec
-    double TermControl::_GetAutoScrollSpeed(double cursorDistanceFromBorder) const
+    double TermControl::_GetOffscreenSelectionAutoScrollSpeed(double cursorDistanceFromBorder) const
     {
         // The numbers below just feel well, feel free to change.
         // TODO: Maybe account for space beyond border that user has available
         return std::pow(cursorDistanceFromBorder, 2.0) / 25.0 + 2.0;
+    }
+
+    double TermControl::_GetMousePanningAutoScrollVelocity(double cursorDistanceFromAnchor) const
+    {
+        const double minDist = 10;
+        if (cursorDistanceFromAnchor < minDist)
+        {
+            return 0;
+        }
+
+        double abs = std::pow(cursorDistanceFromAnchor - minDist, 2.0) / 25.0 + 2.0;
+        return ((cursorDistanceFromAnchor > 0) ? 1 : -1) * abs;
     }
 
     // clang-format off

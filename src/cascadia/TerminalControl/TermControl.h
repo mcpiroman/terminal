@@ -89,11 +89,16 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
 
         std::optional<int> _lastScrollOffset;
 
-        // Auto scroll occurs when user, while selecting, drags cursor outside viewport. View is then scrolled to 'follow' the cursor.
+        // Auto scroll occurs when:
+        //      - User, while selecting, drags cursor outside viewport. View is then scrolled to 'follow' the cursor.
+        //      - OR user is mouse panning (middle mouse button scroll)
         double _autoScrollVelocity;
         std::optional<Windows::UI::Input::PointerPoint> _autoScrollingPointerPoint;
         Windows::UI::Xaml::DispatcherTimer _autoScrollTimer;
         std::optional<std::chrono::high_resolution_clock::time_point> _lastAutoScrollUpdateTime;
+
+        bool _isMousePanning;
+        Windows::Foundation::Point _mousePanningAnchor;
 
         // storage location for the leading surrogate of a utf-16 surrogate pair
         std::optional<wchar_t> _leadingSurrogate;
@@ -145,9 +150,12 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
         bool _CapturePointer(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
         bool _ReleasePointerCapture(Windows::Foundation::IInspectable const& sender, Windows::UI::Xaml::Input::PointerRoutedEventArgs const& e);
 
-        void _TryStartAutoScroll(Windows::UI::Input::PointerPoint const& pointerPoint, const double scrollVelocity);
-        void _TryStopAutoScroll(const uint32_t pointerId);
+        bool _TryStartAutoScroll(Windows::UI::Input::PointerPoint const& pointerPoint, const double scrollVelocity);
+        bool _TryStopAutoScroll(const uint32_t pointerId);
         void _UpdateAutoScroll(Windows::Foundation::IInspectable const& sender, Windows::Foundation::IInspectable const& e);
+
+        void _TryStartMousePanning(Windows::UI::Input::PointerPoint const& pointerPoint);
+        void _TryStopMousePanning(const uint32_t pointerId);
 
         void _ScrollbarUpdater(Windows::UI::Xaml::Controls::Primitives::ScrollBar scrollbar, const int viewTop, const int viewHeight, const int bufferSize);
         static Windows::UI::Xaml::Thickness _ParseThicknessFromPadding(const hstring padding);
@@ -156,7 +164,8 @@ namespace winrt::Microsoft::Terminal::TerminalControl::implementation
 
         const COORD _GetTerminalPosition(winrt::Windows::Foundation::Point cursorPosition);
 
-        double _GetAutoScrollSpeed(double cursorDistanceFromBorder) const;
+        double _GetOffscreenSelectionAutoScrollSpeed(double cursorDistanceFromBorder) const;
+        double _GetMousePanningAutoScrollVelocity(double cursorDistanceFromAnchor) const;
     };
 }
 
